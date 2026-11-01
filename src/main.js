@@ -328,15 +328,19 @@ const axoSkinMaterial = new THREE.MeshPhysicalMaterial({
 });
 
 const finMaterial = new THREE.MeshPhysicalMaterial({
-  color: 0xffc2d4,
+  color: 0xffb3c6,
   emissive: 0xff4d6d,
-  emissiveIntensity: 0.18,
-  roughness: 0.15,
-  transmission: 0.72,
-  thickness: 0.25,
-  ior: 1.28,
+  emissiveIntensity: 0.32,
+  roughness: 0.22,
+  metalness: 0.05,
+  clearcoat: 0.6,
+  clearcoatRoughness: 0.2,
+  transmission: 0.32,
+  thickness: 0.4,
+  ior: 1.33,
   transparent: true,
-  opacity: 0.68,
+  opacity: 0.78,
+  depthWrite: false,
   side: THREE.DoubleSide,
 });
 
@@ -462,7 +466,7 @@ headGroup.add(createRealisticEye(false));
 // 2. Anatomical Tapering Salamander Trunk with Spine Curvature
 const torsoSegments = [];
 const TORSO_LENGTH = 3.6;
-const trunkGeo = new THREE.CylinderGeometry(0.85, 0.58, TORSO_LENGTH, 32, 24);
+const trunkGeo = new THREE.CylinderGeometry(0.85, 0.58, TORSO_LENGTH, 32, 24, true);
 trunkGeo.rotateX(Math.PI / 2);
 // Shape trunk: slightly flattened oval with subtle belly drop
 const tPos = trunkGeo.attributes.position;
@@ -482,21 +486,238 @@ const trunkMesh = new THREE.Mesh(trunkGeo, axoSkinMaterial);
 trunkMesh.position.set(0, 0.28, -0.6);
 axolotlRoot.add(trunkMesh);
 
-// 3. Realistic Translucent Dorsal & Caudal Fin
-const finShape = new THREE.Shape();
-finShape.moveTo(0, 0.45);
-finShape.bezierCurveTo(0, 0.65, -1.2, 0.95, -2.6, 1.2);
-finShape.bezierCurveTo(-4.2, 1.35, -5.8, 1.1, -6.8, 0.1);
-finShape.bezierCurveTo(-6.2, -0.6, -4.5, -0.85, -3.2, -0.65);
-finShape.bezierCurveTo(-1.8, -0.45, 0, -0.3, 0, 0.45);
+// 3. Anatomical Caudal Tail & Continuous Caudal Fin Attached to Body Posterior
+// Unlike previous rigid fin positioned artificially mid-torso, this tail attaches
+// directly to the end of the body (z = -1.8 in trunkMesh space / z = -2.4 in world space)
+// with a laterally compressed muscular core and sweeping translucent dorsal & ventral fin.
 
-const finExtrudeSettings = { depth: 0.04, bevelEnabled: true, bevelSegments: 3, steps: 1, bevelSize: 0.02, bevelThickness: 0.02 };
-const finGeo = new THREE.ExtrudeGeometry(finShape, finExtrudeSettings);
-finGeo.rotateY(-Math.PI / 2);
-finGeo.scale(1.0, 0.85, 1.0);
-const finMesh = new THREE.Mesh(finGeo, finMaterial);
-finMesh.position.set(0, 0.35, -0.2);
-axolotlRoot.add(finMesh);
+const tailGroup = new THREE.Group();
+tailGroup.position.set(0, 0, -1.8); // Exactly at posterior terminus of trunk
+trunkMesh.add(tailGroup);
+
+// --- A. Muscular Caudal Tail Core (Laterally Compressed Amphibian Peduncle) ---
+const TAIL_LENGTH = 4.8;
+const TAIL_SECTIONS = 30;
+const TAIL_RADIAL = 18;
+
+const tailCoreBasePos = [];
+const tailCoreIndices = [];
+
+for (let s = 0; s <= TAIL_SECTIONS; s++) {
+  const u = s / TAIL_SECTIONS;
+  const z = -u * TAIL_LENGTH;
+
+  // Laterally compressed salamander cross-section (narrower than tall as it tapers)
+  const rx = 0.66 * Math.pow(1 - u, 0.75) * (1 - u * 0.28) + 0.02;
+  const ryTop = 0.51 * Math.pow(1 - u, 0.55) * (1 - u * 0.18) + 0.025;
+  const ryBot = 0.57 * Math.pow(1 - u, 0.58) * (1 - u * 0.18) + 0.025;
+
+  for (let r = 0; r <= TAIL_RADIAL; r++) {
+    const theta = (r / TAIL_RADIAL) * Math.PI * 2;
+    const cosT = Math.cos(theta);
+    const sinT = Math.sin(theta);
+    const ry = sinT >= 0 ? ryTop : ryBot;
+    tailCoreBasePos.push(rx * cosT, ry * sinT, z);
+  }
+}
+
+for (let s = 0; s < TAIL_SECTIONS; s++) {
+  for (let r = 0; r < TAIL_RADIAL; r++) {
+    const i0 = s * (TAIL_RADIAL + 1) + r;
+    const i1 = i0 + 1;
+    const i2 = (s + 1) * (TAIL_RADIAL + 1) + r;
+    const i3 = i2 + 1;
+    tailCoreIndices.push(i0, i2, i1, i1, i2, i3);
+  }
+}
+
+const tailCoreGeo = new THREE.BufferGeometry();
+tailCoreGeo.setAttribute('position', new THREE.Float32BufferAttribute(tailCoreBasePos.slice(), 3));
+tailCoreGeo.setIndex(tailCoreIndices);
+tailCoreGeo.computeVertexNormals();
+const tailCoreMesh = new THREE.Mesh(tailCoreGeo, axoSkinMaterial);
+tailGroup.add(tailCoreMesh);
+
+// --- B. Translucent Dorsal & Ventral Caudal Fin Membrane ---
+const FIN_POINTS_PER_SEC = 6;
+const EXTRA_PADDLE_SECS = 4;
+const TOTAL_FIN_SECS = TAIL_SECTIONS + EXTRA_PADDLE_SECS;
+
+const tailFinBasePos = [];
+const tailFinIndices = [];
+
+for (let s = 0; s <= TOTAL_FIN_SECS; s++) {
+  const u = Math.min(1.0, s / TAIL_SECTIONS);
+  let z = -u * TAIL_LENGTH;
+  if (s > TAIL_SECTIONS) {
+    const tipStep = (s - TAIL_SECTIONS) / EXTRA_PADDLE_SECS;
+    z += -tipStep * 0.55; // paddle tip extends beyond fleshy core
+  }
+
+  const rx = 0.66 * Math.pow(1 - u, 0.75) * (1 - u * 0.28) + 0.02;
+  const ryTop = 0.51 * Math.pow(1 - u, 0.55) * (1 - u * 0.18) + 0.025;
+  const ryBot = 0.57 * Math.pow(1 - u, 0.58) * (1 - u * 0.18) + 0.025;
+
+  // Smoothly ramp fin height from 0 at the trunk attachment (u=0) into the full swimming crest
+  const smoothRamp = u < 0.16 ? (u / 0.16) * (u / 0.16) * (3 - 2 * (u / 0.16)) : 1.0;
+  let dH = (0.78 * Math.sin(Math.pow(u, 0.65) * Math.PI) + 0.05) * smoothRamp * (1.0 - (s > TAIL_SECTIONS ? ((s - TAIL_SECTIONS) / EXTRA_PADDLE_SECS) * 0.38 : 0));
+  let vD = (0.58 * Math.sin(Math.pow(u, 0.8) * Math.PI) + 0.02) * smoothRamp * (1.0 - (s > TAIL_SECTIONS ? ((s - TAIL_SECTIONS) / EXTRA_PADDLE_SECS) * 0.38 : 0));
+
+  if (s === TOTAL_FIN_SECS) {
+    dH *= 0.5;
+    vD *= 0.5;
+  }
+
+  const y0 = ryTop + dH;          // Top dorsal fin edge
+  const y1 = ryTop + dH * 0.45;   // Upper dorsal fin mid-web
+  const y2 = ryTop * 0.9;         // Dorsal base at core
+  const y3 = -ryBot * 0.9;        // Ventral base at core
+  const y4 = -ryBot - vD * 0.45;  // Lower ventral fin mid-web
+  const y5 = -ryBot - vD;         // Bottom ventral fin edge
+
+  const yVals = [y0, y1, y2, y3, y4, y5];
+  for (let p = 0; p < FIN_POINTS_PER_SEC; p++) {
+    tailFinBasePos.push(0, yVals[p], z);
+  }
+}
+
+for (let s = 0; s < TOTAL_FIN_SECS; s++) {
+  for (let p = 0; p < FIN_POINTS_PER_SEC - 1; p++) {
+    const i0 = s * FIN_POINTS_PER_SEC + p;
+    const i1 = i0 + 1;
+    const i2 = (s + 1) * FIN_POINTS_PER_SEC + p;
+    const i3 = i2 + 1;
+    tailFinIndices.push(i0, i2, i1, i1, i2, i3);
+  }
+}
+
+const tailFinGeo = new THREE.BufferGeometry();
+tailFinGeo.setAttribute('position', new THREE.Float32BufferAttribute(tailFinBasePos.slice(), 3));
+tailFinGeo.setIndex(tailFinIndices);
+tailFinGeo.computeVertexNormals();
+const tailFinMesh = new THREE.Mesh(tailFinGeo, finMaterial);
+tailGroup.add(tailFinMesh);
+const finMesh = tailFinMesh; // Maintain alias
+
+// --- D. Caudal Spinal Cord Neural Extension (Internal Connectome) ---
+const tailSpinePts = [];
+const TAIL_SPINE_NODES = 24;
+for (let i = 0; i < TAIL_SPINE_NODES; i++) {
+  const u = i / TAIL_SPINE_NODES;
+  tailSpinePts.push(new THREE.Vector3(0, 0, -u * (TAIL_LENGTH * 0.88)));
+}
+const tailSpineGeo = new THREE.BufferGeometry().setFromPoints(tailSpinePts);
+const tailSpineMat = new THREE.LineBasicMaterial({
+  color: 0x38bdf8,
+  transparent: true,
+  opacity: 0.65,
+  blending: THREE.AdditiveBlending,
+});
+const tailSpineMesh = new THREE.Line(tailSpineGeo, tailSpineMat);
+tailGroup.add(tailSpineMesh);
+
+// Pre-allocated buffers for zero garbage collection during animation
+const spineXArr = new Float32Array(TOTAL_FIN_SECS + 1);
+const spineYArr = new Float32Array(TOTAL_FIN_SECS + 1);
+const angleYArr = new Float32Array(TOTAL_FIN_SECS + 1);
+
+// --- Tail Dynamic Wave Undulation Function ---
+function updateTailAnimation(elapsedTime) {
+  const swimSpeed = 1.8;
+  const waveNumber = 4.2;
+
+  // Precompute spine centerline positions and smooth tangents
+  for (let s = 0; s <= TOTAL_FIN_SECS; s++) {
+    const u = Math.min(1.0, s / TAIL_SECTIONS);
+    const wavePhase = -u * waveNumber;
+    // Amplitude increases exponentially from 0 at the trunk attachment to 0.88 at tip
+    const amp = Math.pow(u, 1.35) * 0.72 + u * 0.16;
+
+    spineXArr[s] = Math.sin(elapsedTime * swimSpeed + wavePhase) * amp +
+                   Math.sin(elapsedTime * (swimSpeed * 2.0) + wavePhase * 1.35) * (amp * 0.12);
+    spineYArr[s] = Math.cos(elapsedTime * swimSpeed + wavePhase) * (u * 0.045);
+  }
+
+  const dzStep = TAIL_LENGTH / TAIL_SECTIONS;
+  for (let s = 0; s <= TOTAL_FIN_SECS; s++) {
+    const prevS = Math.max(0, s - 1);
+    const nextS = Math.min(TOTAL_FIN_SECS, s + 1);
+    const dx = spineXArr[nextS] - spineXArr[prevS];
+    const dz = (nextS - prevS) * dzStep;
+    angleYArr[s] = Math.atan2(dx, dz);
+  }
+
+  // 1. Update Core Geometry Vertices
+  const cPos = tailCoreGeo.attributes.position.array;
+  let cPtr = 0;
+
+  for (let s = 0; s <= TAIL_SECTIONS; s++) {
+    const u = s / TAIL_SECTIONS;
+    const spineX = spineXArr[s];
+    const spineY = spineYArr[s];
+    const cosA = Math.cos(angleYArr[s]);
+    const sinA = Math.sin(angleYArr[s]);
+
+    for (let r = 0; r <= TAIL_RADIAL; r++) {
+      const bx = tailCoreBasePos[cPtr];
+      const by = tailCoreBasePos[cPtr + 1];
+      const bz = tailCoreBasePos[cPtr + 2];
+      const relZ = bz - (-u * TAIL_LENGTH);
+
+      cPos[cPtr] = spineX + bx * cosA - relZ * sinA;
+      cPos[cPtr + 1] = spineY + by;
+      cPos[cPtr + 2] = -u * TAIL_LENGTH + bx * sinA + relZ * cosA;
+      cPtr += 3;
+    }
+  }
+  tailCoreGeo.attributes.position.needsUpdate = true;
+  tailCoreGeo.computeVertexNormals();
+
+  // 2. Update Caudal Fin Geometry Vertices with Hydrodynamic Drag Flutter
+  const fPos = tailFinGeo.attributes.position.array;
+  let fPtr = 0;
+
+  for (let s = 0; s <= TOTAL_FIN_SECS; s++) {
+    const u = Math.min(1.0, s / TAIL_SECTIONS);
+    const wavePhase = -u * waveNumber;
+    const amp = Math.pow(u, 1.35) * 0.72 + u * 0.16;
+
+    const spineX = spineXArr[s];
+    const spineY = spineYArr[s];
+    const cosA = Math.cos(angleYArr[s]);
+    const sinA = Math.sin(angleYArr[s]);
+
+    for (let p = 0; p < FIN_POINTS_PER_SEC; p++) {
+      const bx = tailFinBasePos[fPtr];
+      const by = tailFinBasePos[fPtr + 1];
+      const bz = tailFinBasePos[fPtr + 2];
+      const secZ = s <= TAIL_SECTIONS ? -u * TAIL_LENGTH : -TAIL_LENGTH - ((s - TAIL_SECTIONS) / EXTRA_PADDLE_SECS) * 0.55;
+      const relZ = bz - secZ;
+
+      // Hydrodynamic fin drag: outer edges (p=0 top, p=5 bottom) lag behind the muscular spine
+      const edgeDist = p === 0 || p === 5 ? 1.0 : (p === 1 || p === 4 ? 0.5 : 0.0);
+      const finLagX = Math.sin(elapsedTime * swimSpeed + wavePhase - 0.55 * edgeDist) * (amp * 0.28 * edgeDist);
+
+      fPos[fPtr] = spineX + bx * cosA - relZ * sinA + finLagX;
+      fPos[fPtr + 1] = spineY + by;
+      fPos[fPtr + 2] = secZ + bx * sinA + relZ * cosA;
+      fPtr += 3;
+    }
+  }
+  tailFinGeo.attributes.position.needsUpdate = true;
+  tailFinGeo.computeVertexNormals();
+
+  // 3. Update Caudal Spinal Cord Line
+  const sPos = tailSpineGeo.attributes.position.array;
+  for (let i = 0; i < TAIL_SPINE_NODES; i++) {
+    const u = i / TAIL_SPINE_NODES;
+    const sIdx = Math.round(u * TAIL_SECTIONS);
+    sPos[i * 3] = spineXArr[sIdx];
+    sPos[i * 3 + 1] = spineYArr[sIdx];
+    sPos[i * 3 + 2] = -u * (TAIL_LENGTH * 0.88);
+  }
+  tailSpineGeo.attributes.position.needsUpdate = true;
+}
 
 // 4. Feathery Coral-Crimson External Gills (3 pairs, dense organic plumes)
 const gillGroups = [];
@@ -1408,8 +1629,9 @@ function animate() {
   if (trunkMesh) {
     trunkMesh.rotation.y = Math.sin(elapsedTime * 1.8) * 0.06;
   }
-  if (finMesh) {
-    finMesh.rotation.y = Math.sin(elapsedTime * 1.8 - 0.6) * 0.16;
+  // Dynamic Caudal Tail & Fin Swimming Movement
+  if (typeof updateTailAnimation === 'function') {
+    updateTailAnimation(elapsedTime);
   }
   if (headGroup) {
     headGroup.rotation.y = Math.sin(elapsedTime * 1.2) * 0.03;
